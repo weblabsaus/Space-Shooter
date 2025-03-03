@@ -82,6 +82,33 @@
             align-items: center;
             color: white;
         }
+        #health-bar {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 200px;
+            height: 20px;
+            background-color: #333;
+            border: 2px solid white;
+            display: none;
+        }
+        #health-fill {
+            width: 100%;
+            height: 100%;
+            background-color: #f00;
+            transition: width 0.3s;
+        }
+        #damage-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(255, 0, 0, 0.3);
+            pointer-events: none;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -91,6 +118,10 @@
         <div id="score-display">Score: 0 | High Score: 0</div>
         <div id="time-display" style="display: none;">Time: 30s | Targets: 0/10</div>
     </div>
+    <div id="health-bar">
+        <div id="health-fill"></div>
+    </div>
+    <div id="damage-overlay"></div>
     <div id="title-screen">
         <h1>Space FPS</h1>
         <button id="start-endless" class="start-button">Start Endless Mode</button>
@@ -113,8 +144,13 @@
         let targetsHit = 0;
         let timerInterval;
         let isScoped = false;
+        let playerHealth = 100;
+        let lastHitTime = 0;
         const scope = document.getElementById('scope');
         const crosshair = document.getElementById('crosshair');
+        const healthBar = document.getElementById('health-bar');
+        const healthFill = document.getElementById('health-fill');
+        const damageOverlay = document.getElementById('damage-overlay');
         
         function init() {
             scene = new THREE.Scene();
@@ -146,9 +182,13 @@
             score = 0;
             targetsHit = 0;
             timeRemaining = 30;
+            playerHealth = 100;
+            updateHealthBar();
+            
             document.getElementById('title-screen').style.display = 'none';
             document.getElementById('crosshair').style.display = 'block';
             document.getElementById('game-ui').style.display = 'block';
+            document.getElementById('health-bar').style.display = 'block';
             document.getElementById('score-display').style.display = (gameMode === 'endless' || gameMode === 'zen') ? 'block' : 'none';
             document.getElementById('time-display').style.display = gameMode === 'timed' ? 'block' : 'none';
             createEnvironment();
@@ -216,11 +256,26 @@
                 new THREE.SphereGeometry(0.5, 32, 32),
                 new THREE.MeshBasicMaterial({ color: gameMode === 'zen' ? 0xFFFF00 : 0xFF0000 })
             );
-            enemy.position.set(
-                Math.random() * 40 - 20,
-                Math.random() * 40 - 20,
-                Math.random() * -40 - 10
-            );
+            
+            // Position enemies farther away in endless mode
+            if (gameMode === 'endless') {
+                enemy.position.set(
+                    Math.random() * 60 - 30,
+                    Math.random() * 60 - 30,
+                    Math.random() * -80 - 20
+                );
+                // Add movement toward player in endless mode
+                enemy.isMovingTowardPlayer = true;
+                enemy.moveSpeed = 0.05 + Math.random() * 0.02; // Slow speed
+            } else {
+                enemy.position.set(
+                    Math.random() * 40 - 20,
+                    Math.random() * 40 - 20,
+                    Math.random() * -40 - 10
+                );
+                enemy.isMovingTowardPlayer = false;
+            }
+            
             scene.add(enemy);
             enemies.push(enemy);
         }
@@ -304,18 +359,49 @@
             document.getElementById('time-display').textContent = `Time: ${timeRemaining}s | Targets: ${targetsHit}/10`;
         }
 
-        function endGame() {
+        function takeDamage() {
+            // Only take damage every second at most
+            const now = Date.now();
+            if (now - lastHitTime < 1000) return;
+            lastHitTime = now;
+            
+            playerHealth -= 20; // Lose 20% health per hit
+            updateHealthBar();
+            showDamageEffect();
+            
+            if (playerHealth <= 0) {
+                endGame(true);
+            }
+        }
+
+        function updateHealthBar() {
+            healthFill.style.width = `${playerHealth}%`;
+        }
+
+        function showDamageEffect() {
+            damageOverlay.style.display = 'block';
+            setTimeout(() => {
+                damageOverlay.style.display = 'none';
+            }, 300);
+        }
+
+        function endGame(playerDied = false) {
             gameStarted = false;
             clearInterval(timerInterval);
             document.exitPointerLock();
             const gameOverScreen = document.getElementById('game-over-screen');
             const gameOverMessage = document.getElementById('game-over-message');
-            if (gameMode === 'endless' || gameMode === 'zen') {
+            
+            if (playerDied) {
+                gameOverMessage.textContent = `You Died! Your score: ${score}`;
+            } else if (gameMode === 'endless' || gameMode === 'zen') {
                 gameOverMessage.textContent = `Game Over! Your score: ${score}`;
             } else {
                 gameOverMessage.textContent = targetsHit >= 10 ? 'You win!' : 'Time\'s up!';
             }
+            
             gameOverScreen.style.display = 'flex';
+            document.getElementById('health-bar').style.display = 'none';
         }
 
         function restartGame() {
@@ -329,6 +415,7 @@
             requestAnimationFrame(animate);
             
             if (gameStarted) {
+                // Update bullet positions
                 scene.children.forEach(object => {
                     if (object.velocity) {
                         object.position.add(object.velocity);
@@ -338,17 +425,41 @@
                     }
                 });
 
-                enemies.forEach((enemy, index) => {
-                    scene.children.forEach(object => {
+                // Update enemy positions and check for collisions
+                for (let i = enemies.length - 1; i >= 0; i--) {
+                    const enemy = enemies[i];
+                    
+                    // Move enemies toward player in endless mode
+                    if (gameMode === 'endless' && enemy.isMovingTowardPlayer) {
+                        const direction = new THREE.Vector3();
+                        direction.subVectors(camera.position, enemy.position).normalize();
+                        enemy.position.add(direction.multiplyScalar(enemy.moveSpeed));
+                    }
+                    
+                    // Check if enemy hits player
+                    if (enemy.position.distanceTo(camera.position) < 1.5) {
+                        if (gameMode === 'endless') {
+                            takeDamage();
+                        }
+                    }
+                    
+                    // Check if bullet hits enemy
+                    let enemyHit = false;
+                    for (let j = scene.children.length - 1; j >= 0; j--) {
+                        const object = scene.children[j];
                         if (object.velocity && object.position.distanceTo(enemy.position) < 0.5) {
                             scene.remove(enemy);
                             scene.remove(object);
-                            enemies.splice(index, 1);
+                            enemies.splice(i, 1);
                             createEnemy();
                             updateScore();
+                            enemyHit = true;
+                            break;
                         }
-                    });
-                });
+                    }
+                    
+                    if (enemyHit) continue;
+                }
             }
 
             renderer.render(scene, camera);
